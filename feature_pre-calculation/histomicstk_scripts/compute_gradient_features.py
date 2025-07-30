@@ -103,33 +103,24 @@ def compute_gradient_features(im_label, im_intensity,
         )
 
         # compute mean
-        fdata.at[i, 'Gradient.Mag.Mean'] = np.mean(pixelGradients)
 
+        fdata.loc[i, 'Gradient.Mag.Mean'] = np.mean(pixelGradients)
         # compute standard deviation
-        fdata.at[i, 'Gradient.Mag.Std'] = np.std(pixelGradients)
-
+        fdata.loc[i, 'Gradient.Mag.Std'] = np.std(pixelGradients)
         # compute skewness
-        fdata.at[i, 'Gradient.Mag.Skewness'] = scipy.stats.skew(pixelGradients)
-
+        fdata.loc[i, 'Gradient.Mag.Skewness'] = scipy.stats.skew(pixelGradients)
         # compute kurtosis
-        fdata.at[i, 'Gradient.Mag.Kurtosis'] = \
-            scipy.stats.kurtosis(pixelGradients)
-
+        fdata.loc[i, 'Gradient.Mag.Kurtosis'] = scipy.stats.kurtosis(pixelGradients)
         # compute intensity histogram
         hist, bins = np.histogram(pixelGradients, bins=num_hist_bins)
         prob = hist/np.sum(hist, dtype=np.float32)
-
         # compute entropy
-        fdata.at[i, 'Gradient.Mag.HistEntropy'] = scipy.stats.entropy(prob)
-
+        fdata.loc[i, 'Gradient.Mag.HistEntropy'] = scipy.stats.entropy(prob)
         # compute energy
-        fdata.at[i, 'Gradient.Mag.HistEnergy'] = np.sum(prob**2)
-
+        fdata.loc[i, 'Gradient.Mag.HistEnergy'] = np.sum(prob**2)
         bw_canny = cannyG[rprops[i].coords[:, 0], rprops[i].coords[:, 1]]
         canny_sum = np.sum(bw_canny).astype('float')
-
-        fdata.at[i, 'Gradient.Canny.Sum'] = canny_sum
-
-        fdata.at[i, 'Gradient.Canny.Mean'] = canny_sum / len(pixelGradients)
+        fdata.loc[i, 'Gradient.Canny.Sum'] = canny_sum
+        fdata.loc[i, 'Gradient.Canny.Mean'] = canny_sum / len(pixelGradients)
 
     return fdata

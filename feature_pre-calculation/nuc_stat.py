@@ -41,7 +41,119 @@ from histomicstk_scripts import compute_fsd_features, compute_intensity_features
 from scipy.ndimage import zoom
 import concurrent.futures
 
+
 opj = os.path.join
+
+# --- Helper for parallel nucleus feature extraction (for multiprocessing pickling) ---
+def process_single_nucleus(
+    id,
+    contours_min_x,
+    contours_min_y,
+    contours_max_x,
+    contours_max_y,
+    image_cache,
+    slide,
+    contours,
+    args,
+    feat_color,
+    feat_color_cyto,
+    feat_morphology,
+    features,
+    get_cytoplasm_features_func,
+    zoom_func,
+    draw_polygon_func
+):
+    import numpy as np
+    import copy
+    try:
+        x1, y1 = contours_min_x[id], contours_min_y[id]
+        x2, y2 = contours_max_x[id], contours_max_y[id]
+        bbox = [x1, y1, x2, y2]
+        cache_key = f"{x1}_{y1}_{x2}_{y2}"
+        if cache_key in image_cache:
+            nuclei_img, nuclei_np = image_cache[cache_key]
+        else:
+            nuclei_img = slide.read_region(location=(x1,y1), level=0, size=(x2-x1, y2-y1))
+            nuclei_np = np.array(nuclei_img)
+            if len(nuclei_np.shape) == 3:
+                nuclei_np = nuclei_np[:,:,:3]
+            else:
+                nuclei_np = np.repeat(nuclei_np[:, :, np.newaxis], 3, axis=2)
+            if (x2-x1) * (y2-y1) < 1000000:
+                image_cache[cache_key] = (nuclei_img, nuclei_np)
+        mask = np.zeros((nuclei_np.shape[0], nuclei_np.shape[1]), dtype=np.uint8)
+        contour = contours[id, ...] - [x1, y1]
+        if len(contour.shape) == 3:
+            contour = contour[0]
+        contour = np.vstack((contour, contour[0,:])).astype(int)
+        contour[:,0] = np.clip(contour[:,0], 0, nuclei_np.shape[1]-1)
+        contour[:,1] = np.clip(contour[:,1], 0, nuclei_np.shape[0]-1)
+        vertex_row_coords = contour[:,1]
+        vertex_col_coords = contour[:,0]
+        fill_row_coords, fill_col_coords = draw_polygon_func(vertex_row_coords, vertex_col_coords)
+        mask[fill_row_coords, fill_col_coords] = 1
+        if args.magnification is not None and args.magnification == 20:
+            width, height = nuclei_img.size
+            nuclei_img = nuclei_img.resize((width * 2, height * 2))
+            zoom_factors = (2, 2, 1)
+            nuclei_np = zoom_func(nuclei_np, zoom_factors, order=3)
+            zoom_factors = (2, 2)
+            mask = zoom_func(mask, zoom_factors, order=3)
+        object_mask = mask.astype(float)
+        object_mask[object_mask==0] = np.nan
+        nuclei_np_object = nuclei_np * np.stack([object_mask] * 3, axis=-1)
+        nuclei_np_object = nuclei_np_object[..., 0:3]
+        nuclei_np_object_grey = np.dot(nuclei_np_object[..., :3], [0.2989, 0.5870, 0.1140])
+        nuclei_np_object_grey[np.isnan(nuclei_np_object[...,0])] = np.nan
+        import skimage.measure
+        stat = skimage.measure.regionprops(mask)[0]
+        stat_color = {}
+        if np.all(np.isnan(nuclei_np_object_grey)):
+            stat_color['Grey_mean'] = np.nan
+            stat_color['Grey_std']  = np.nan
+            stat_color['Grey_min']  = np.nan
+            stat_color['Grey_max']  = np.nan
+        else:
+            stat_color['Grey_mean'] = np.nanmean(nuclei_np_object_grey)
+            stat_color['Grey_std']  = np.nanstd(nuclei_np_object_grey)
+            stat_color['Grey_min']  = np.nanmin(nuclei_np_object_grey)
+            stat_color['Grey_max']  = np.nanmax(nuclei_np_object_grey)
+        if np.all(np.isnan(nuclei_np_object)):
+            stat_color['R_mean'], stat_color['G_mean'], stat_color['B_mean'] = np.nan, np.nan, np.nan
+            stat_color['R_std'],  stat_color['G_std'],  stat_color['B_std']  = np.nan, np.nan, np.nan
+            stat_color['R_min'],  stat_color['G_min'],  stat_color['B_min']  = np.nan, np.nan, np.nan
+            stat_color['R_max'],  stat_color['G_max'],  stat_color['B_max']  = np.nan, np.nan, np.nan
+        else:
+            channel_stats = [
+                np.nanmean(nuclei_np_object, axis=(0,1)),
+                np.nanstd(nuclei_np_object, axis=(0,1)),
+                np.nanmin(nuclei_np_object, axis=(0,1)),
+                np.nanmax(nuclei_np_object, axis=(0,1))
+            ]
+            stat_color['R_mean'], stat_color['G_mean'], stat_color['B_mean'] = channel_stats[0]
+            stat_color['R_std'],  stat_color['G_std'],  stat_color['B_std']  = channel_stats[1]
+            stat_color['R_min'],  stat_color['G_min'],  stat_color['B_min']  = channel_stats[2]
+            stat_color['R_max'],  stat_color['G_max'],  stat_color['B_max']  = channel_stats[3]
+        stat_morphology = {}
+        stat_morphology['major_axis_length'] = stat['axis_major_length']
+        stat_morphology['minor_axis_length'] = stat['axis_minor_length']
+        stat_morphology['major_minor_ratio'] = stat['axis_major_length']/stat['axis_minor_length']
+        stat_morphology['orientation'] = stat['orientation']
+        stat_morphology['orientation_degree'] = stat['orientation'] * (180/np.pi) + 90
+        stat_morphology['area'] = stat['area']
+        stat_morphology['extent'] = stat['extent']
+        stat_morphology['solidity'] = stat['solidity']
+        stat_morphology['convex_area'] = stat['convex_area']
+        stat_morphology['Eccentricity'] = stat['Eccentricity']
+        stat_morphology['equivalent_diameter'] = stat['equivalent_diameter']
+        stat_morphology['perimeter'] = stat['perimeter']
+        stat_morphology['perimeter_crofton'] = stat['perimeter_crofton']
+        stat_cyto = get_cytoplasm_features_func(id, bbox, 20, 5, 200)
+        total_features = len(feat_color) + len(feat_color_cyto) + len(feat_morphology)
+        return list(stat_color.values()) + list(stat_cyto.values()) + list(stat_morphology.values()) + [np.nan] * (len(features) - total_features)
+    except Exception as e:
+        print(f"Error processing nucleus {id}: {e}")
+        return [np.nan] * len(features)
 
 # Global variables for worker processes
 contours = None
@@ -162,6 +274,51 @@ class NumpySlide():
 
 
 class SlideProperty():
+    def _get_nuc_img_mask(self, id, bbox):
+        [x1, y1, x2, y2] = bbox
+        nuclei_img = self.slide.read_region(location=(x1, y1), level=0, size=(x2 - x1, y2 - y1))
+
+        nuclei_np = np.array(nuclei_img)
+        if len(nuclei_np.shape) == 3:
+            nuclei_np = nuclei_np[:, :, :3]
+        else:
+            nuclei_np = np.repeat(nuclei_np[:, :, np.newaxis], 3, axis=2)
+
+        mask = np.zeros((nuclei_np.shape[0], nuclei_np.shape[1]), dtype=np.uint8)
+        contour = self.contours[id, ...] - [x1, y1]
+
+        if len(contour.shape) == 3:
+            contour = contour[0]
+
+        contour = np.vstack((contour, contour[0, :])).astype(int)
+        contour[contour[:, 0] >= nuclei_np.shape[1], 0] = nuclei_np.shape[1] - 1
+        contour[contour[:, 1] >= nuclei_np.shape[0], 1] = nuclei_np.shape[0] - 1
+        vertex_row_coords = contour[:, 1]
+        vertex_col_coords = contour[:, 0]
+        fill_row_coords, fill_col_coords = draw.polygon(vertex_row_coords, vertex_col_coords)
+        mask[fill_row_coords, fill_col_coords] = 1
+
+        # Handle magnification if needed
+        # ...
+
+        object_mask = mask.astype(float)
+        object_mask[object_mask == 0] = np.nan
+        nuclei_np_object = nuclei_np * np.dstack([object_mask] * nuclei_np.shape[-1])
+        nuclei_np_object = nuclei_np_object[..., 0:3]
+
+        # Create grayscale version
+        def rgb2gray(rgb):
+            r = rgb[..., 0]
+            g = rgb[..., 1]
+            b = rgb[..., 2]
+            gray = 0.2989 * r + 0.5870 * g + 0.1140 * b
+            gray = np.nan_to_num(gray, nan=0.0)
+            return gray.astype(np.uint8)
+
+        nuclei_np_object_grey = rgb2gray(nuclei_np_object).astype(float)
+        nuclei_np_object_grey[np.isnan(nuclei_np_object[..., 0])] = np.nan
+
+        return nuclei_img, nuclei_np, nuclei_np_object, nuclei_np_object_grey, mask
 
     def __init__(self, args):
         super(SlideProperty, self).__init__()
@@ -286,12 +443,12 @@ class SlideProperty():
         self.nuc_stat_processed.index = self.nuc_stat_processed.index.values.astype(int)
         
         
-        print('Step [3/3]: Get delaunay graph.')
-        print("Current Time =", datetime.now().strftime("%H:%M:%S"))
+        # print('Step [3/3]: Get delaunay graph.')
+        # print("Current Time =", datetime.now().strftime("%H:%M:%S"))
 
-        df_delaunay = self._get_delaunay_graph_stat()
-        df_delaunay.index = nuc_keys
-        self.nuc_stat_processed = pd.concat([self.nuc_stat_processed, df_delaunay], axis=1)
+        # df_delaunay = self._get_delaunay_graph_stat_parallel()
+        # df_delaunay.index = nuc_keys
+        # self.nuc_stat_processed = pd.concat([self.nuc_stat_processed, df_delaunay], axis=1)
         
         
         print('All Done.')
@@ -553,242 +710,49 @@ class SlideProperty():
         # Cache for common image patches if they overlap
         image_cache = {}
         
-        # Process a single nucleus ID with optimizations
-        def process_single_nucleus(id):
-            try:
-                # Get the bounding box using pre-processed data
-                x1, y1 = contours_min_x[id], contours_min_y[id]
-                x2, y2 = contours_max_x[id], contours_max_y[id]
-                
-                bbox = [x1, y1, x2, y2]
-                
-                # Check if we can reuse a cached image patch
-                cache_key = f"{x1}_{y1}_{x2}_{y2}"
-                if cache_key in image_cache:
-                    nuclei_img, nuclei_np = image_cache[cache_key]
-                else:
-                    nuclei_img = self.slide.read_region(location=(x1,y1), level=0, size=(x2-x1, y2-y1))
-                    nuclei_np = np.array(nuclei_img)
-                    if len(nuclei_np.shape) == 3:
-                        nuclei_np = nuclei_np[:,:,:3]
-                    else:
-                        nuclei_np = np.repeat(nuclei_np[:, :, np.newaxis], 3, axis=2)
-                    
-                    # Only cache if the region is reasonably small (to prevent memory explosion)
-                    if (x2-x1) * (y2-y1) < 1000000:  # 1 million pixels threshold
-                        image_cache[cache_key] = (nuclei_img, nuclei_np)
-                
-                # Create mask - use GPU if available
-                if has_gpu:
-                    # Move to GPU
-                    nuclei_np_gpu = cp.array(nuclei_np)
-                    mask_gpu = cp.zeros((nuclei_np.shape[0], nuclei_np.shape[1]), dtype=cp.uint8)
-                    
-                    # Process contour
-                    contour = self.contours[id, ...] - [x1, y1]
-                    if len(contour.shape) == 3:
-                        contour = contour[0]
-                    contour = np.vstack((contour, contour[0,:])).astype(int)
-                    
-                    # Clip contour points to image boundaries
-                    contour[:,0] = np.clip(contour[:,0], 0, nuclei_np.shape[1]-1)
-                    contour[:,1] = np.clip(contour[:,1], 0, nuclei_np.shape[0]-1)
-                    
-                    # Create mask on CPU then transfer to GPU
-                    mask = np.zeros((nuclei_np.shape[0], nuclei_np.shape[1]), dtype=np.uint8)
-                    vertex_row_coords = contour[:,1]
-                    vertex_col_coords = contour[:,0]
-                    fill_row_coords, fill_col_coords = draw.polygon(vertex_row_coords, vertex_col_coords)
-                    mask[fill_row_coords, fill_col_coords] = 1
-                    mask_gpu = cp.array(mask)
-                    
-                    # Apply magnification if needed - on GPU
-                    if self.args.magnification is not None and self.args.magnification == 20:
-                        # Resize image
-                        width, height = nuclei_img.size
-                        nuclei_img = nuclei_img.resize((width * 2, height * 2))
-                        
-                        # Use GPU zoom
-                        zoom_factors = (2, 2, 1)
-                        nuclei_np_gpu = cupy_ndimage.zoom(nuclei_np_gpu, zoom_factors, order=3)
-                        zoom_factors = (2, 2)
-                        mask_gpu = cupy_ndimage.zoom(mask_gpu, zoom_factors, order=3)
-                    
-                    # Create object mask on GPU
-                    object_mask_gpu = mask_gpu.astype(cp.float32)
-                    object_mask_gpu[object_mask_gpu==0] = cp.nan
-                    
-                    # Stack mask for RGB channels
-                    object_mask_stacked = cp.stack([object_mask_gpu] * 3, axis=-1)
-                    nuclei_np_object_gpu = nuclei_np_gpu * object_mask_stacked
-                    
-                    # Convert to grayscale on GPU
-                    # Using the RGB2Gray formula: 0.2989 * R + 0.5870 * G + 0.1140 * B
-                    weights = cp.array([0.2989, 0.5870, 0.1140])
-                    nuclei_np_object_grey_gpu = cp.sum(nuclei_np_object_gpu[..., :3] * weights, axis=-1)
-                    nuclei_np_object_grey_gpu[cp.isnan(nuclei_np_object_gpu[...,0])] = cp.nan
-                    
-                    # Move back to CPU for regionprops (which doesn't work on GPU)
-                    mask = cp.asnumpy(mask_gpu)
-                    nuclei_np_object = cp.asnumpy(nuclei_np_object_gpu)
-                    nuclei_np_object_grey = cp.asnumpy(nuclei_np_object_grey_gpu)
-                else:
-                    # CPU processing path
-                    mask = np.zeros((nuclei_np.shape[0], nuclei_np.shape[1]), dtype=np.uint8)
-                    contour = self.contours[id, ...] - [x1, y1]
-                    
-                    if len(contour.shape) == 3:
-                        contour = contour[0]
-                    
-                    # Optimize by avoiding stacking if possible
-                    contour = np.vstack((contour, contour[0,:])).astype(int)
-                    
-                    # Clip contour points to valid image coordinates more efficiently
-                    contour[:,0] = np.clip(contour[:,0], 0, nuclei_np.shape[1]-1)
-                    contour[:,1] = np.clip(contour[:,1], 0, nuclei_np.shape[0]-1)
-                    
-                    vertex_row_coords = contour[:,1]
-                    vertex_col_coords = contour[:,0]
-                    fill_row_coords, fill_col_coords = draw.polygon(vertex_row_coords, vertex_col_coords)
-                    mask[fill_row_coords, fill_col_coords] = 1
-                    
-                    # Apply magnification if needed
-                    if self.args.magnification is not None and self.args.magnification == 20:
-                        width, height = nuclei_img.size
-                        nuclei_img = nuclei_img.resize((width * 2, height * 2))
-                        zoom_factors = (2, 2, 1)
-                        nuclei_np = zoom(nuclei_np, zoom_factors, order=3)
-                        zoom_factors = (2, 2)
-                        mask = zoom(mask, zoom_factors, order=3)
-                    
-                    # Create object mask
-                    object_mask = mask.astype(float)
-                    object_mask[object_mask==0] = np.nan
-                    
-                    # Vectorized approach to avoid loops
-                    nuclei_np_object = nuclei_np * np.stack([object_mask] * 3, axis=-1)
-                    nuclei_np_object = nuclei_np_object[..., 0:3]
-                    
-                    # Vectorized grayscale conversion (same weights as above)
-                    nuclei_np_object_grey = np.dot(nuclei_np_object[..., :3], [0.2989, 0.5870, 0.1140])
-                    nuclei_np_object_grey[np.isnan(nuclei_np_object[...,0])] = np.nan
-                
-                # Get regionprops - this remains on CPU as regionprops isn't GPU-compatible
-                stat = skimage.measure.regionprops(mask)[0]
-                
-                # Extract features with vectorized operations where possible
-                stat_color = {}
-                
-                # Compute color statistics with vectorized operations
-                if np.all(np.isnan(nuclei_np_object_grey)):
-                    stat_color['Grey_mean'] = np.nan
-                    stat_color['Grey_std']  = np.nan
-                    stat_color['Grey_min']  = np.nan
-                    stat_color['Grey_max']  = np.nan
-                else:
-                    stat_color['Grey_mean'] = np.nanmean(nuclei_np_object_grey)
-                    stat_color['Grey_std']  = np.nanstd(nuclei_np_object_grey)
-                    stat_color['Grey_min']  = np.nanmin(nuclei_np_object_grey)
-                    stat_color['Grey_max']  = np.nanmax(nuclei_np_object_grey)
-                
-                if np.all(np.isnan(nuclei_np_object)):
-                    stat_color['R_mean'], stat_color['G_mean'], stat_color['B_mean'] = np.nan, np.nan, np.nan
-                    stat_color['R_std'],  stat_color['G_std'],  stat_color['B_std']  = np.nan, np.nan, np.nan
-                    stat_color['R_min'],  stat_color['G_min'],  stat_color['B_min']  = np.nan, np.nan, np.nan
-                    stat_color['R_max'],  stat_color['G_max'],  stat_color['B_max']  = np.nan, np.nan, np.nan
-                else:
-                    # Vectorized computation for all channels simultaneously
-                    channel_stats = [
-                        np.nanmean(nuclei_np_object, axis=(0,1)),
-                        np.nanstd(nuclei_np_object, axis=(0,1)),
-                        np.nanmin(nuclei_np_object, axis=(0,1)),
-                        np.nanmax(nuclei_np_object, axis=(0,1))
-                    ]
-                    
-                    stat_color['R_mean'], stat_color['G_mean'], stat_color['B_mean'] = channel_stats[0]
-                    stat_color['R_std'],  stat_color['G_std'],  stat_color['B_std']  = channel_stats[1]
-                    stat_color['R_min'],  stat_color['G_min'],  stat_color['B_min']  = channel_stats[2]
-                    stat_color['R_max'],  stat_color['G_max'],  stat_color['B_max']  = channel_stats[3]
-                
-                # Morphology features (direct assignment is already optimal)
-                stat_morphology = {}
-                stat_morphology['major_axis_length'] = stat['axis_major_length']
-                stat_morphology['minor_axis_length'] = stat['axis_minor_length']
-                stat_morphology['major_minor_ratio'] = stat['axis_major_length']/stat['axis_minor_length']
-                stat_morphology['orientation'] = stat['orientation']
-                stat_morphology['orientation_degree'] = stat['orientation'] * (180/np.pi) + 90
-                stat_morphology['area'] = stat['area']
-                stat_morphology['extent'] = stat['extent']
-                stat_morphology['solidity'] = stat['solidity']
-                stat_morphology['convex_area'] = stat['convex_area']
-                stat_morphology['Eccentricity'] = stat['Eccentricity']
-                stat_morphology['equivalent_diameter'] = stat['equivalent_diameter']
-                stat_morphology['perimeter'] = stat['perimeter']
-                stat_morphology['perimeter_crofton'] = stat['perimeter_crofton']
-                
-                # Cytoplasm feature - always use the existing method
-                # We don't call a GPU-specific method that doesn't exist yet
-                stat_cyto = self._get_cytoplasm_features(id, bbox, offset=20, dilation_kernel=5, bg_threshold=200)
-                
-                # For this simplified example, return just color features
-                total_features = len(feat_color) + len(feat_color_cyto) + len(feat_morphology) + \
-                 len(feat_haralick) + len(feat_gradient) + len(feat_intensity) + len(feat_fsd)
-                 
-                # Return color features + NaN for the rest
-                return list(stat_color.values()) + list(stat_cyto.values()) + list(stat_morphology.values()) + \
-                       [np.nan] * (total_features - len(stat_color) - len(stat_cyto) - len(stat_morphology))
-                
-            except Exception as e:
-                print(f"Error processing nucleus {id}: {e}")
-                return [np.nan] * len(features)  # Return a list of NaNs with the correct length
-        
-        # Optimize parallel processing
+        # Use the top-level process_single_nucleus for parallel processing
+        # Always use ThreadPoolExecutor to avoid pickling errors with unpicklable objects
         from concurrent.futures import ThreadPoolExecutor
         import threading
-        
-        # Increase batch size for better efficiency
+
         batch_size = 2000  # Increased from 1000
         num_batches = (len(self.nuclei_index) + batch_size - 1) // batch_size
-        
-        # Use more worker threads based on system capabilities
-        max_workers = min(16, mp.cpu_count() * 2)  # Increased from 8
-        
-        # Pre-allocate results array for better memory efficiency
+        max_workers = min(16, mp.cpu_count() * 2)
         nucstat_all = np.zeros((len(self.nuclei_index), len(features)), dtype=np.float32)
-        nucstat_all.fill(np.nan)  # Initialize with NaN
-        
-        # Use a proper progress bar
+        nucstat_all.fill(np.nan)
         from tqdm.auto import tqdm
-        
+
         for batch_idx in range(num_batches):
             start_idx = batch_idx * batch_size
             end_idx = min((batch_idx + 1) * batch_size, len(self.nuclei_index))
             batch_indices = self.nuclei_index[start_idx:end_idx]
             batch_positions = np.arange(start_idx, end_idx)
-            
+
             print(f"Processing batch {batch_idx+1}/{num_batches} ({len(batch_indices)} nuclei)")
-            
-            # Create a concurrent.futures.ProcessPoolExecutor if GPU is not available for better CPU utilization
-            if not has_gpu and 'ProcessPoolExecutor' not in locals():
-                try:
-                    from concurrent.futures import ProcessPoolExecutor
-                    executor_class = ProcessPoolExecutor
-                    print("Using process-based parallelism for CPU processing")
-                except ImportError:
-                    executor_class = ThreadPoolExecutor
-                    print("Using thread-based parallelism")
-            else:
-                executor_class = ThreadPoolExecutor  # Use threads with GPU to avoid CUDA context issues
-            
-            with executor_class(max_workers=max_workers) as executor:
-                # Use a dictionary to map futures to their array positions
+
+            with ThreadPoolExecutor(max_workers=max_workers) as executor:
                 future_to_position = {}
-                
                 for i, idx in enumerate(batch_indices):
-                    future = executor.submit(process_single_nucleus, idx)
+                    future = executor.submit(
+                        process_single_nucleus,
+                        idx,
+                        contours_min_x,
+                        contours_min_y,
+                        contours_max_x,
+                        contours_max_y,
+                        image_cache,
+                        self.slide,
+                        self.contours,
+                        self.args,
+                        feat_color,
+                        feat_color_cyto,
+                        feat_morphology,
+                        features,
+                        self._get_cytoplasm_features,
+                        zoom,
+                        draw.polygon
+                    )
                     future_to_position[future] = batch_positions[i]
-                
-                # Process results as they complete
                 for future in tqdm(
                     concurrent.futures.as_completed(future_to_position),
                     total=len(batch_indices),
@@ -796,12 +760,20 @@ class SlideProperty():
                 ):
                     pos = future_to_position[future]
                     try:
-                        nucstat_all[pos] = future.result()
+                        result = future.result()
+                        # Debug print for NaN values in feature extraction
+                        haralick_slice = slice(len(feat_color)+len(feat_color_cyto)+len(feat_morphology), len(feat_color)+len(feat_color_cyto)+len(feat_morphology)+len(feat_haralick))
+                        gradient_slice = slice(haralick_slice.stop, haralick_slice.stop+len(feat_gradient))
+                        intensity_slice = slice(gradient_slice.stop, gradient_slice.stop+len(feat_intensity))
+                        fsd_slice = slice(intensity_slice.stop, intensity_slice.stop+len(feat_fsd))
+                        print(f"[DEBUG] Nucleus {pos}: Haralick {result[haralick_slice]}")
+                        print(f"[DEBUG] Nucleus {pos}: Gradient {result[gradient_slice]}")
+                        print(f"[DEBUG] Nucleus {pos}: Intensity {result[intensity_slice]}")
+                        print(f"[DEBUG] Nucleus {pos}: FSD {result[fsd_slice]}")
+                        nucstat_all[pos] = result
                     except Exception as e:
                         print(f"Future error: {e}")
-                        # Already filled with NaN, so we can skip this
-            
-            # Clear image cache between batches to manage memory
+
             image_cache.clear()
         
         # Create DataFrame directly from the pre-allocated array
@@ -900,11 +872,27 @@ class SlideProperty():
         stat_haralick = self._get_haralick_features(nuclei_np_object, resolution, quantization=10)
         #     Gradient features & Intensity features (HistomicTK)
         im_intensity = self.rgb2gray(nuclei_np)
-        df_gradient = compute_gradient_features.compute_gradient_features(mask, im_intensity, num_hist_bins=10, rprops=[stat])
-        df_intensity = compute_intensity_features.compute_intensity_features(mask, im_intensity, num_hist_bins=10,rprops=[stat], feature_list=None)
-        #     Fourier shape descriptors (HistomicTK)
-        #     These represent simplifications of object shape.
-        df_fsd = compute_fsd_features.compute_fsd_features(mask, K=128, Fs=6, Delta=8, rprops=[stat])
+        # Debug: print mask and intensity stats
+        print(f"[DEBUG] Nucleus {id}: mask shape {mask.shape}, dtype {mask.dtype}, unique values: {np.unique(mask)}")
+        print(f"[DEBUG] Nucleus {id}: im_intensity shape {im_intensity.shape}, dtype {im_intensity.dtype}, min {np.min(im_intensity)}, max {np.max(im_intensity)}")
+        try:
+            df_gradient = compute_gradient_features.compute_gradient_features(mask, im_intensity, num_hist_bins=10, rprops=[stat])
+            print(f"[DEBUG] Nucleus {id}: df_gradient shape {df_gradient.shape}, NaN count {np.isnan(df_gradient.values).sum()}")
+        except Exception as e:
+            print(f"[ERROR] Nucleus {id}: Gradient feature extraction failed: {e}")
+            df_gradient = pd.DataFrame(np.full((1,8), np.nan))
+        try:
+            df_intensity = compute_intensity_features.compute_intensity_features(mask, im_intensity, num_hist_bins=10, rprops=[stat], feature_list=None)
+            print(f"[DEBUG] Nucleus {id}: df_intensity shape {df_intensity.shape}, NaN count {np.isnan(df_intensity.values).sum()}")
+        except Exception as e:
+            print(f"[ERROR] Nucleus {id}: Intensity feature extraction failed: {e}")
+            df_intensity = pd.DataFrame(np.full((1,12), np.nan))
+        try:
+            df_fsd = compute_fsd_features.compute_fsd_features(mask, K=128, Fs=6, Delta=8, rprops=[stat])
+            print(f"[DEBUG] Nucleus {id}: df_fsd shape {df_fsd.shape}, NaN count {np.isnan(df_fsd.values).sum()}")
+        except Exception as e:
+            print(f"[ERROR] Nucleus {id}: FSD feature extraction failed: {e}")
+            df_fsd = pd.DataFrame(np.full((1,6), np.nan))
         #    Merge all features
         x = list(stat_color.values()) + \
             list(stat_cyto.values()) + \
@@ -913,7 +901,6 @@ class SlideProperty():
             list(df_gradient.values.reshape(-1)) + \
             list(df_intensity.values.reshape(-1)) + \
             list(df_fsd.values.reshape(-1))
-        
         return x
     
     

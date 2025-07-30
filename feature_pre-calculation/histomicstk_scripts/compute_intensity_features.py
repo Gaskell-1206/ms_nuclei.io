@@ -126,7 +126,7 @@ def compute_intensity_features(
     # conditionally execute calculations if x in the features list
     def _conditional_execution(feature, func, *args, **kwargs):
         if feature in feature_list:
-            fdata.at[i, feature] = func(*args, **kwargs)
+            fdata.loc[i, feature] = func(*args, **kwargs)
 
     def _return_input(x):
         return x
