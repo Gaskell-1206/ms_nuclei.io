@@ -621,30 +621,6 @@ class SlideProperty():
                 nuclei_np_object_grey = np.dot(nuclei_np_object[..., :3], [0.2989, 0.5870, 0.1140])
                 nuclei_np_object_grey[np.isnan(nuclei_np_object[...,0])] = np.nan
 
-                # Calculate H&E stain intensities
-                try:
-                    he_stains = separate_stains(nuclei_np_object.astype(np.uint8), hdx_from_rgb)
-                    h_channel = he_stains[:, :, 0]
-                    e_channel = he_stains[:, :, 1]
-                    stat_color['H_mean'] = np.nanmean(h_channel)
-                    stat_color['H_std']  = np.nanstd(h_channel)
-                    stat_color['H_min']  = np.nanmin(h_channel)
-                    stat_color['H_max']  = np.nanmax(h_channel)
-                    stat_color['E_mean'] = np.nanmean(e_channel)
-                    stat_color['E_std']  = np.nanstd(e_channel)
-                    stat_color['E_min']  = np.nanmin(e_channel)
-                    stat_color['E_max']  = np.nanmax(e_channel)
-                except Exception as e:
-                    print("Error in H&E stain separation:", e)
-                    stat_color['H_mean'] = np.nan
-                    stat_color['H_std']  = np.nan
-                    stat_color['H_min']  = np.nan
-                    stat_color['H_max']  = np.nan
-                    stat_color['E_mean'] = np.nan
-                    stat_color['E_std']  = np.nan
-                    stat_color['E_min']  = np.nan
-                    stat_color['E_max']  = np.nan
-                #
                 stat = skimage.measure.regionprops(mask)[0]
                 stat_color = {}
                 
@@ -676,6 +652,31 @@ class SlideProperty():
                     stat_color['R_min'],  stat_color['G_min'],  stat_color['B_min']  = channel_stats[2]
                     stat_color['R_max'],  stat_color['G_max'],  stat_color['B_max']  = channel_stats[3]
                 
+                # Calculate H&E stain intensities
+                try:
+                    he_stains = separate_stains(nuclei_np_object.astype(np.uint8), hdx_from_rgb)
+                    h_channel = he_stains[:, :, 0]
+                    e_channel = he_stains[:, :, 1]
+                    stat_color['H_mean'] = np.nanmean(h_channel)
+                    stat_color['H_std']  = np.nanstd(h_channel)
+                    stat_color['H_min']  = np.nanmin(h_channel)
+                    stat_color['H_max']  = np.nanmax(h_channel)
+                    stat_color['E_mean'] = np.nanmean(e_channel)
+                    stat_color['E_std']  = np.nanstd(e_channel)
+                    stat_color['E_min']  = np.nanmin(e_channel)
+                    stat_color['E_max']  = np.nanmax(e_channel)
+                except Exception as e:
+                    print("Error in H&E stain separation:", e)
+                    stat_color['H_mean'] = np.nan
+                    stat_color['H_std']  = np.nan
+                    stat_color['H_min']  = np.nan
+                    stat_color['H_max']  = np.nan
+                    stat_color['E_mean'] = np.nan
+                    stat_color['E_std']  = np.nan
+                    stat_color['E_min']  = np.nan
+                    stat_color['E_max']  = np.nan
+                #
+
                 # Morphology features (direct assignment is already optimal)
                 stat_morphology = {}
                 stat_morphology['major_axis_length'] = stat['axis_major_length']
