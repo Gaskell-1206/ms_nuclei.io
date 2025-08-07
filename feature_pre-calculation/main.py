@@ -91,7 +91,7 @@ if __name__ == '__main__':
             dt = SlideProperty(args)
             dt.read_stardist_data()
             dt.get_mask()
-            # dt.get_nucstat()
+            #dt.get_nucstat()
             dt.get_nucstat_parallel()
             
             nuclei_stat = dt.nuc_stat_processed
